@@ -1,0 +1,35 @@
+# =============================================
+# CRM Ciclo Confort — .gitignore
+# =============================================
+
+# === Secretos y credenciales ===
+.env
+
+# === Entornos virtuales de Python ===
+venv/
+env/
+.venv/
+
+# === Archivos compilados y caché ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# === Base de datos local (desarrollo) ===
+*.db
+*.db-journal
+
+# === Archivos multimedia descargados ===
+media/
+
+# === IDE y editores ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === Sistema operativo ===
+.DS_Store
+Thumbs.db
