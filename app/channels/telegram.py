@@ -23,10 +23,15 @@ class TelegramAdapter(ChannelAdapter):
 
         chat_id = str(msg["chat"]["id"])
         nombre = msg.get("from", {}).get("first_name", "Cliente")
+        message_id = msg.get("message_id")
+        update_id = payload.get("update_id")
+        id_mensaje_canal = f"tg_{update_id}_{message_id}" if update_id else (f"tg_{message_id}_{chat_id}" if message_id else None)
+
         resultado = MensajeEntrante(
             canal="telegram",
             id_externo=chat_id,
             nombre_remitente=nombre,
+            id_mensaje_canal=id_mensaje_canal,
             payload_crudo=payload,
         )
 

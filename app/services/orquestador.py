@@ -1,19 +1,21 @@
 """
 Orquestador Central.
-Recibe un mensaje normalizado del adapter y coordina todo el flujo:
+Recibe un mensaje normalizado (UnifiedMessage) del adapter y coordina todo el flujo:
 
-1. Obtener o crear la conversación.
-2. Resolver multimedia (audio → texto, imagen → descripción).
-3. Guardar el mensaje del cliente en la DB.
-4. Decidir quién responde (IA vs Humano).
-5. Si IA: generar respuesta, guardarla y enviarla.
-6. Notificar al panel React en tiempo real.
+1. Verificar idempotencia por id_mensaje_canal (descarte inmediato si ya fue procesado).
+2. Obtener o crear la conversación.
+3. Resolver multimedia multicanal (audio → texto vía Whisper/Gemini, imagen → descripción).
+4. Guardar el mensaje del cliente en la DB con id_mensaje_canal.
+5. Decidir quién responde (IA vs Humano).
+6. Triage dinámico inteligente (con autocompletado de teléfono en WhatsApp).
+7. Notificar al panel React en tiempo real vía WebSockets.
 """
 import logging
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
-from app.channels.base import ChannelAdapter, MensajeEntrante, MensajeSaliente
-from app.models.enums import ModoAtencion, TipoMensaje, TipoContenido, EstadoOnboarding
+from sqlalchemy.exc import IntegrityError
+from app.channels.base import ChannelAdapter, UnifiedMessage, MensajeSaliente
+from app.models.enums import ModoAtencion, TipoMensaje, TipoContenido, EstadoOnboarding, CanalOrigen
 from app.models.mensaje import Mensaje
 from app.services.agente_ia_service import AgenteIAService
 from app.services.media_service import MediaService
@@ -26,12 +28,13 @@ settings = get_settings()
 
 # ======================================================
 # CONFIGURACIÓN DEL TRIAGE (ONBOARDING)
+# Botones limitados a <= 20 caracteres para compatibilidad con WhatsApp
 # ======================================================
 TRIAGE_STEPS = [
     {
         "clave": "intencion",
         "pregunta": "¡Hola {nombre}! Para brindarte una mejor atención, ¿en qué servicio estás interesado?",
-        "teclado": [["❄️ Aire Acondicionado"], ["🔧 Plomería"], ["Otro"]],
+        "teclado": [["❄️ Climatización"], ["🔧 Plomería"], ["Otro"]],
         "remover_teclado": False
     },
     {
@@ -58,7 +61,7 @@ TRIAGE_STEPS = [
 class Orquestador:
     """
     Punto de entrada central para procesar mensajes entrantes.
-    Agnóstico al canal — recibe MensajeEntrante normalizados.
+    Agnóstico al canal — opera exclusivamente sobre UnifiedMessage.
     """
 
     def __init__(self, db: Session, canal: ChannelAdapter):
@@ -69,11 +72,26 @@ class Orquestador:
         self.agente_ia = AgenteIAService(db)
         self.notificacion = NotificacionService()
 
-    async def procesar_mensaje_entrante(self, mensaje: MensajeEntrante):
+    async def procesar_mensaje_entrante(self, mensaje: UnifiedMessage):
         """
-        Flujo principal de procesamiento de un mensaje entrante.
+        Flujo principal de procesamiento de un mensaje entrante con idempotencia.
         """
-        # 1. Obtener o crear conversación
+        # 1. Idempotencia: Verificar si el mensaje ya fue procesado
+        if mensaje.id_mensaje_canal:
+            msg_existente = (
+                self.db.query(Mensaje)
+                .filter(Mensaje.id_mensaje_canal == mensaje.id_mensaje_canal)
+                .first()
+            )
+            if msg_existente:
+                logger.warning(
+                    "⚠️ Idempotencia: Mensaje duplicado descartado (%s de %s)",
+                    mensaje.id_mensaje_canal,
+                    mensaje.canal,
+                )
+                return
+
+        # 2. Obtener o crear conversación
         conversacion = self.conv_service.obtener_o_crear(mensaje)
         logger.info(
             "🔄 Conv #%d | Cliente: %s | Canal: %s | Modo: %s",
@@ -83,63 +101,94 @@ class Orquestador:
             conversacion.modo_atencion.value,
         )
 
-        # 2. Procesar multimedia si aplica
+        # 3. Procesar multimedia multicanal si aplica
         texto_para_ia = mensaje.texto
         tipo_contenido = TipoContenido.TEXTO
         archivo_media_id = None
 
-        if mensaje.audio_file_id:
+        if mensaje.audio_file_id or mensaje.audio_url:
             tipo_contenido = TipoContenido.AUDIO
+            resultado_media = None
             try:
-                audio_url = await self.canal.obtener_url_archivo(
-                    mensaje.audio_file_id
-                )
-                if audio_url:
-                    resultado = await self.media.procesar_audio(audio_url)
-                    texto_para_ia = resultado.texto_extraido
-                    archivo_media_id = resultado.archivo_id
+                # Intento de descarga autenticada directa en bytes (WhatsApp / Meta)
+                if mensaje.audio_file_id:
+                    descarga = await self.canal.descargar_archivo(mensaje.audio_file_id)
+                    if descarga:
+                        contenido_bytes, _ = descarga
+                        resultado_media = await self.media.procesar_audio_bytes(contenido_bytes)
+
+                # Fallback a URL pública (Telegram / Facebook attachments)
+                if not resultado_media:
+                    audio_url = mensaje.audio_url or await self.canal.obtener_url_archivo(mensaje.audio_file_id)
+                    if audio_url:
+                        resultado_media = await self.media.procesar_audio(audio_url)
+
+                if resultado_media:
+                    texto_para_ia = resultado_media.texto_extraido
+                    archivo_media_id = resultado_media.archivo_id
                     logger.info("🎤 Audio transcrito: '%s...'", texto_para_ia[:60])
             except Exception as e:
                 logger.error("Error procesando audio: %s", e, exc_info=True)
                 texto_para_ia = "[Audio recibido — no se pudo procesar]"
 
-        elif mensaje.imagen_file_id:
+        elif mensaje.imagen_file_id or mensaje.imagen_url:
             tipo_contenido = TipoContenido.IMAGEN
+            resultado_media = None
             try:
-                imagen_url = await self.canal.obtener_url_archivo(
-                    mensaje.imagen_file_id
-                )
-                if imagen_url:
-                    resultado = await self.media.procesar_imagen(imagen_url, prompt_adicional=mensaje.texto)
-                    texto_para_ia = resultado.texto_extraido
-                    archivo_media_id = resultado.archivo_id
+                # Intento de descarga autenticada directa en bytes
+                if mensaje.imagen_file_id:
+                    descarga = await self.canal.descargar_archivo(mensaje.imagen_file_id)
+                    if descarga:
+                        contenido_bytes, _ = descarga
+                        resultado_media = await self.media.procesar_imagen_bytes(
+                            contenido_bytes, prompt_adicional=mensaje.texto
+                        )
+
+                # Fallback a URL pública
+                if not resultado_media:
+                    imagen_url = mensaje.imagen_url or await self.canal.obtener_url_archivo(mensaje.imagen_file_id)
+                    if imagen_url:
+                        resultado_media = await self.media.procesar_imagen(
+                            imagen_url, prompt_adicional=mensaje.texto
+                        )
+
+                if resultado_media:
+                    texto_para_ia = resultado_media.texto_extraido
+                    archivo_media_id = resultado_media.archivo_id
                     logger.info("📷 Imagen analizada: '%s...'", texto_para_ia[:60])
             except Exception as e:
                 logger.error("Error procesando imagen: %s", e, exc_info=True)
                 texto_para_ia = "[Imagen recibida — no se pudo procesar]"
 
-        # Si no hay texto ni multimedia procesado, usar placeholder
+        # Placeholder si no hay texto ni multimedia procesado
         if not texto_para_ia:
             texto_para_ia = "[Mensaje sin contenido procesable]"
 
-        # 3. Guardar mensaje del cliente en la DB
+        # 4. Guardar mensaje del cliente en la DB
         msg_cliente = Mensaje(
             conversacion_id=conversacion.id,
             tipo_mensaje=TipoMensaje.CLIENTE,
             tipo_contenido=tipo_contenido,
             contenido=texto_para_ia,
             archivo_media_id=archivo_media_id,
+            id_mensaje_canal=mensaje.id_mensaje_canal,
         )
         self.db.add(msg_cliente)
-        self.db.commit()
-        self.db.refresh(msg_cliente)
+        try:
+            self.db.commit()
+            self.db.refresh(msg_cliente)
+        except IntegrityError:
+            self.db.rollback()
+            logger.warning(
+                "⚠️ Carrera de idempotencia detectada para id_mensaje_canal=%s. Abortando duplicado.",
+                mensaje.id_mensaje_canal,
+            )
+            return
 
-        # 4. Notificar al panel React (siempre, sin importar quién atiende)
+        # 5. Notificar al panel React en tiempo real
         await self.notificacion.nuevo_mensaje(conversacion.id, msg_cliente)
 
-        # ================================================
-        # 5. DECISIÓN CLAVE: ¿Quién responde?
-        # ================================================
+        # 6. Decisión de atención: IA vs Humano vs Pausado
         if conversacion.modo_atencion == ModoAtencion.IA:
             if conversacion.estado_onboarding != EstadoOnboarding.FINALIZADO:
                 logger.info("📋 Conv #%d → Procesando Triage (Estado: %s)", conversacion.id, conversacion.estado_onboarding)
@@ -149,35 +198,27 @@ class Orquestador:
                 await self._responder_con_ia(conversacion, mensaje, texto_para_ia)
 
         elif conversacion.modo_atencion == ModoAtencion.HUMANO:
-            # NO hacer nada automático.
-            # El mensaje ya se guardó y se notificó al panel.
-            # El humano responderá desde la interfaz.
-            logger.info(
-                "👤 Conv #%d → Modo HUMANO, esperando respuesta del gerente",
-                conversacion.id,
-            )
+            logger.info("👤 Conv #%d → Modo HUMANO, esperando respuesta del gerente", conversacion.id)
 
         elif conversacion.modo_atencion == ModoAtencion.PAUSADO:
             logger.info("⏸️ Conv #%d → Conversación pausada, sin respuesta", conversacion.id)
 
-    async def _procesar_onboarding(self, conversacion, mensaje: MensajeEntrante, texto_para_ia: str):
-        """Maneja el flujo determinístico de triage dinámico."""
+    async def _procesar_onboarding(self, conversacion, mensaje: UnifiedMessage, texto_para_ia: str):
+        """Maneja el flujo determinístico de triage con UX inteligente para WhatsApp."""
         cliente = conversacion.cliente
         paso_actual = conversacion.paso_onboarding
 
-        # Si ya estábamos en un paso, guardar la respuesta del usuario en los metadatos
-        if paso_actual > 0 and paso_actual <= len(TRIAGE_STEPS):
+        # Guardar respuesta previa en los metadatos del cliente
+        if 0 < paso_actual <= len(TRIAGE_STEPS):
             paso_previo = TRIAGE_STEPS[paso_actual - 1]
             clave_previa = paso_previo["clave"]
-            
-            # Inicializar dict si es None
+
             if not cliente.metadatos:
                 cliente.metadatos = {}
-            
+
             cliente.metadatos = {**cliente.metadatos, clave_previa: texto_para_ia}
             flag_modified(cliente, "metadatos")
-            
-            # Compatibilidad con columnas nativas
+
             if clave_previa == "telefono":
                 cliente.telefono = texto_para_ia
             elif clave_previa == "ubicacion":
@@ -189,23 +230,38 @@ class Orquestador:
         if paso_actual >= len(TRIAGE_STEPS):
             conversacion.estado_onboarding = EstadoOnboarding.FINALIZADO
             logger.info("✅ Conv #%d → Onboarding finalizado. Activando IA.", conversacion.id)
-            
-            # Disparamos la respuesta IA con la FICHA DEL CLIENTE
             await self._responder_con_ia(conversacion, mensaje, texto_para_ia, remover_teclado=True)
             return
 
-        # Obtener el paso a preguntar ahora
+        # Paso siguiente
         paso_siguiente = TRIAGE_STEPS[paso_actual]
+
+        # === UX Inteligente: Si el usuario escribe desde WhatsApp y el paso es 'telefono', autocompletar ===
+        if paso_siguiente["clave"] == "telefono" and mensaje.canal in ("whatsapp", CanalOrigen.WHATSAPP.value):
+            if not cliente.metadatos:
+                cliente.metadatos = {}
+            cliente.telefono = mensaje.id_externo
+            cliente.metadatos = {**cliente.metadatos, "telefono": mensaje.id_externo}
+            flag_modified(cliente, "metadatos")
+            conversacion.estado_onboarding = EstadoOnboarding.FINALIZADO
+            self.db.commit()
+
+            logger.info(
+                "💡 Conv #%d (WhatsApp) → Teléfono autocompletado (%s). Omitiendo pregunta y finalizando triage.",
+                conversacion.id,
+                mensaje.id_externo,
+            )
+            await self._responder_con_ia(conversacion, mensaje, texto_para_ia, remover_teclado=True)
+            return
+
         respuesta_texto = paso_siguiente["pregunta"].format(nombre=mensaje.nombre_remitente or "visitante")
         teclado = paso_siguiente.get("teclado")
         remover_teclado = paso_siguiente.get("remover_teclado", False)
 
-        # Avanzar el puntero para la próxima vez
         conversacion.paso_onboarding += 1
-
         self.db.commit()
 
-        # Guardar respuesta del sistema en la DB (para historial)
+        # Guardar mensaje del sistema en la DB
         msg_sistema = Mensaje(
             conversacion_id=conversacion.id,
             tipo_mensaje=TipoMensaje.SISTEMA,
@@ -216,7 +272,7 @@ class Orquestador:
         self.db.commit()
         self.db.refresh(msg_sistema)
 
-        # Enviar por el canal
+        # Enviar respuesta mediante el adaptador del canal
         enviado = await self.canal.enviar_mensaje(
             MensajeSaliente(
                 id_destino=mensaje.id_externo,
@@ -225,29 +281,22 @@ class Orquestador:
                 remover_teclado=remover_teclado,
             )
         )
-        
         if not enviado:
             logger.error("❌ Error enviando respuesta de triage por %s a %s", mensaje.canal, mensaje.id_externo)
 
-        # Notificar al panel
         await self.notificacion.nuevo_mensaje(conversacion.id, msg_sistema)
 
     async def _responder_con_ia(
-        self, conversacion, mensaje: MensajeEntrante, texto_para_ia: str, remover_teclado: bool = False
+        self, conversacion, mensaje: UnifiedMessage, texto_para_ia: str, remover_teclado: bool = False
     ):
-        """Genera una respuesta con el agente IA y la envía al cliente."""
-        # Verificar que hay una API key configurada
+        """Genera respuesta con el agente IA y la despacha al cliente."""
         tiene_llm = (
             (settings.LLM_PROVIDER == "gemini" and settings.GEMINI_API_KEY)
             or (settings.LLM_PROVIDER == "openai" and settings.OPENAI_API_KEY)
         )
 
         if not tiene_llm:
-            # Fallback: respuesta genérica si no hay LLM configurado
-            logger.warning(
-                "⚠️ No hay API key de %s configurada — usando fallback",
-                settings.LLM_PROVIDER,
-            )
+            logger.warning("⚠️ No hay API key de %s configurada — usando fallback", settings.LLM_PROVIDER)
             respuesta_texto = (
                 "¡Hola! Gracias por comunicarte con Ciclo Confort. "
                 "En este momento nuestro asistente no está disponible. "
@@ -259,7 +308,7 @@ class Orquestador:
                 mensaje_actual=texto_para_ia,
             )
 
-        # Guardar respuesta de la IA en la DB
+        # Guardar en DB
         msg_ia = Mensaje(
             conversacion_id=conversacion.id,
             tipo_mensaje=TipoMensaje.IA,
@@ -270,13 +319,9 @@ class Orquestador:
         self.db.commit()
         self.db.refresh(msg_ia)
 
-        logger.info(
-            "✅ Conv #%d → IA respondió: '%s...'",
-            conversacion.id,
-            respuesta_texto[:60],
-        )
+        logger.info("✅ Conv #%d → IA respondió: '%s...'", conversacion.id, respuesta_texto[:60])
 
-        # Enviar por el canal correspondiente
+        # Enviar mensaje al canal
         enviado = await self.canal.enviar_mensaje(
             MensajeSaliente(
                 id_destino=mensaje.id_externo,
@@ -284,9 +329,7 @@ class Orquestador:
                 remover_teclado=remover_teclado,
             )
         )
-
         if not enviado:
             logger.error("❌ Error enviando respuesta por %s a %s", mensaje.canal, mensaje.id_externo)
 
-        # Notificar al panel
         await self.notificacion.nuevo_mensaje(conversacion.id, msg_ia)

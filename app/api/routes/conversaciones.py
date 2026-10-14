@@ -6,7 +6,8 @@ from app.models.mensaje import Mensaje
 from app.models.enums import ModoAtencion, TipoMensaje, TipoContenido, CanalOrigen
 from app.schemas.conversacion import ConversacionResponse, HandoffRequest, RespuestaHumana
 from app.schemas.mensaje import MensajeResponse
-from app.channels.telegram import TelegramAdapter
+from app.channels.dispatcher import dispatcher
+from app.channels.whatsapp import FueraDeVentana24HorasError
 from app.channels.base import MensajeSaliente
 from app.services.notificacion_service import manager, NotificacionService
 
@@ -110,14 +111,27 @@ async def responder_como_humano(
     db.commit()
     db.refresh(msg)
 
-    # Enviar al cliente por el canal correspondiente
-    if conv.canal == CanalOrigen.TELEGRAM:
-        adapter = TelegramAdapter()
-        await adapter.enviar_mensaje(
-            MensajeSaliente(id_destino=conv.id_externo, texto=respuesta.texto)
+    # Enviar al cliente a través del Dispatcher multicanal
+    try:
+        enviado = await dispatcher.dispatch_saliente(
+            canal=conv.canal,
+            mensaje=MensajeSaliente(id_destino=conv.id_externo, texto=respuesta.texto),
+        )
+        if not enviado:
+            raise HTTPException(
+                status_code=502,
+                detail=f"No se pudo despachar el mensaje al canal {conv.canal.value}",
+            )
+    except FueraDeVentana24HorasError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VENTANA_24H_EXPIRADA",
+                "message": str(e),
+            },
         )
 
-    # Notificar al panel
+    # Notificar al panel React
     notificacion = NotificacionService()
     await notificacion.nuevo_mensaje(conv_id, msg)
 

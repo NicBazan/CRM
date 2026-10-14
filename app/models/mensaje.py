@@ -31,6 +31,9 @@ class Mensaje(Base):
     # Metadata cruda del canal (JSON serializado) — para debugging
     metadata_canal = Column(Text, nullable=True)
 
+    # ID único del mensaje emitido por la plataforma (wamid, mid, update_id:message_id) para garantizar idempotencia
+    id_mensaje_canal = Column(String(150), unique=True, index=True, nullable=True)
+
     fecha_creacion = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relaciones

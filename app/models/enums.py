@@ -34,5 +34,6 @@ class CanalOrigen(str, enum.Enum):
     """De qué plataforma viene el mensaje."""
     TELEGRAM = "telegram"
     WHATSAPP = "whatsapp"
+    FACEBOOK = "facebook"
     INSTAGRAM = "instagram"
     WEB = "web"

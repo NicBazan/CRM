@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
-from app.core.database import engine, Base
+from app.core.database import engine, Base, init_db
 from app.api.routes import clientes, webhooks, conversaciones, conocimiento, dev
 
 # Importar todos los modelos para que Base los registre
@@ -64,8 +64,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Crear tablas (en producción usar Alembic)
-Base.metadata.create_all(bind=engine)
+# Crear tablas y aplicar migraciones ligeras
+init_db()
 
 # ==========================================
 # REGISTRAR ROUTERS

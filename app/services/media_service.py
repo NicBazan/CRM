@@ -65,6 +65,45 @@ class MediaService:
         self.db.commit()
         self.db.refresh(archivo)
 
+    def guardar_bytes(self, contenido: bytes, extension: str) -> str:
+        """Guarda un buffer de bytes directamente en disco local."""
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        nombre = f"{uuid.uuid4().hex}{extension}"
+        ruta = os.path.join(MEDIA_DIR, nombre)
+        with open(ruta, "wb") as f:
+            f.write(contenido)
+        return ruta
+
+    async def procesar_audio_bytes(self, audio_bytes: bytes, extension: str = ".ogg") -> ResultadoMedia:
+        """Procesa y transcribe un audio a partir de sus bytes descargados."""
+        ruta_local = self.guardar_bytes(audio_bytes, extension=extension)
+        transcripcion = await self._transcribir_audio(ruta_local)
+
+        archivo = ArchivoMedia(
+            tipo=TipoContenido.AUDIO,
+            ruta_almacenamiento=ruta_local,
+            texto_extraido=transcripcion,
+        )
+        self.db.add(archivo)
+        self.db.commit()
+        self.db.refresh(archivo)
+
+        return ResultadoMedia(archivo_id=archivo.id, texto_extraido=transcripcion)
+
+    async def procesar_imagen_bytes(self, imagen_bytes: bytes, prompt_adicional: str = None, extension: str = ".jpg") -> ResultadoMedia:
+        """Procesa y analiza una imagen a partir de sus bytes descargados."""
+        ruta_local = self.guardar_bytes(imagen_bytes, extension=extension)
+        descripcion = await self._analizar_imagen(ruta_local, prompt_adicional)
+
+        archivo = ArchivoMedia(
+            tipo=TipoContenido.IMAGEN,
+            ruta_almacenamiento=ruta_local,
+            texto_extraido=descripcion,
+        )
+        self.db.add(archivo)
+        self.db.commit()
+        self.db.refresh(archivo)
+
         return ResultadoMedia(archivo_id=archivo.id, texto_extraido=descripcion)
 
     async def _descargar_archivo(self, url: str, extension: str) -> str:

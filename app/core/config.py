@@ -14,6 +14,16 @@ class Settings(BaseSettings):
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = ""
 
+    # --- Meta (WhatsApp Cloud API & Facebook Messenger) ---
+    META_VERIFY_TOKEN: str = "token_de_verificacion_crm"
+    META_APP_SECRET: str = ""
+    META_GRAPH_API_VERSION: str = "v21.0"
+    WHATSAPP_API_TOKEN: str = ""
+    WHATSAPP_PHONE_NUMBER_ID: str = ""
+    WHATSAPP_ARGENTINA_STRIP_9: bool = False
+    FACEBOOK_PAGE_ACCESS_TOKEN: str = ""
+    FACEBOOK_PAGE_ID: str = ""
+
     # --- LLM (Agente IA) ---
     LLM_PROVIDER: str = "gemini"    # Modelos (con soporte para nuevos modelos de Gemini 3.5 Lite para evitar cuotas limitadas y 404s)
     GEMINI_API_KEY: str = ""
