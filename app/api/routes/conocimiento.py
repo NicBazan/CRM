@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.api.deps import get_db
+from app.api.deps import get_db, get_current_user
 from app.models.documento_conocimiento import DocumentoConocimiento
 from app.schemas.mensaje import (
     DocumentoConocimientoCrear,
@@ -8,7 +8,7 @@ from app.schemas.mensaje import (
     DocumentoConocimientoResponse,
 )
 
-router = APIRouter(prefix="/conocimiento", tags=["Knowledge Base"])
+router = APIRouter(prefix="/conocimiento", tags=["Knowledge Base"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/", response_model=list[DocumentoConocimientoResponse])

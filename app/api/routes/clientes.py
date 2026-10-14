@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.api.deps import get_db
+from app.api.deps import get_db, get_current_user
 from app.schemas.cliente import ClienteCrear, ClienteActualizar, ClienteResponse
 from app.services.cliente_service import ClienteService
 
-router = APIRouter(prefix="/clientes", tags=["Clientes"])
+router = APIRouter(prefix="/clientes", tags=["Clientes"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/", response_model=list[ClienteResponse])

@@ -4,13 +4,19 @@ uvicorn>=0.52.0
 pydantic>=2.13.0
 pydantic-settings>=2.9.0
 
-# === Base de datos ===
-sqlalchemy>=2.0.50
+# === Base de datos y Migraciones ===
+sqlalchemy>=2.0.30
+alembic>=1.13.0
 
-# === HTTP Client (para APIs externas: Telegram, LLM) ===
+# === HTTP Client (para APIs externas: Telegram, Meta, LLM) ===
 httpx>=0.28.0
 
-# === Utilidades ===
+# === Seguridad y Autenticación ===
+pyjwt>=2.8.0
+
+# === Utilidades e IA ===
 python-multipart>=0.0.20
 google-genai==2.21.0
-google-generativeai==0.8.6
+
+# === Testing ===
+pytest>=8.0.0

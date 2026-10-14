@@ -3,8 +3,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
-from app.core.database import engine, Base, init_db
-from app.api.routes import clientes, webhooks, conversaciones, conocimiento, dev
+from app.core.database import init_db
+from app.api.routes import auth, clientes, webhooks, conversaciones, conocimiento, dev
 
 # Importar todos los modelos para que Base los registre
 import app.models  # noqa: F401
@@ -32,11 +32,13 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 55)
     logger.info("🚀 CRM Ciclo Confort — Iniciando")
     logger.info("=" * 55)
+    logger.info("  Entorno:   %s", settings.ENVIRONMENT.upper())
     logger.info("  Database:  %s", settings.DATABASE_URL)
     logger.info("  LLM:       %s (%s)", settings.LLM_PROVIDER, settings.GEMINI_MODEL if settings.LLM_PROVIDER == "gemini" else settings.OPENAI_MODEL)
     logger.info("  Gemini:    %s", "✅ Configurada" if settings.GEMINI_API_KEY else "❌ Falta API key")
-    logger.info("  OpenAI:    %s", "✅ Configurada" if settings.OPENAI_API_KEY else "❌ Falta API key")
     logger.info("  Telegram:  %s", "✅ Configurado" if settings.TELEGRAM_BOT_TOKEN else "❌ Falta token")
+    logger.info("  Telegram Secret: %s", "✅ Configurado" if settings.TELEGRAM_SECRET_TOKEN else "⚠️ No configurado")
+    logger.info("  Meta Secret:     %s", "✅ Configurado" if settings.META_APP_SECRET else "⚠️ No configurado")
     logger.info("  CORS:      %s", settings.CORS_ORIGINS)
     logger.info("=" * 55)
 
@@ -51,8 +53,8 @@ async def lifespan(app: FastAPI):
 # ==========================================
 app = FastAPI(
     title="CRM Ciclo Confort",
-    version="2.0.0",
-    description="API del CRM omnicanal con agente IA y human-in-the-loop",
+    version="2.1.0",
+    description="API del CRM omnicanal con agente IA, autenticación y human-in-the-loop",
     lifespan=lifespan,
 )
 
@@ -64,17 +66,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Crear tablas y aplicar migraciones ligeras
+# Inicializar esquema base
 init_db()
 
 # ==========================================
 # REGISTRAR ROUTERS
 # ==========================================
+app.include_router(auth.router)
 app.include_router(clientes.router)
 app.include_router(webhooks.router)
 app.include_router(conversaciones.router)
 app.include_router(conocimiento.router)
-app.include_router(dev.router)
+
+# Las rutas /dev SOLO se habilitan fuera de producción
+if settings.ENVIRONMENT.lower() != "production" and settings.ENABLE_DEV_ROUTES:
+    logger.info("🧪 Rutas /dev habilitadas para pruebas en entorno local/desarrollo.")
+    app.include_router(dev.router)
+else:
+    logger.info("🔒 Rutas /dev desactivadas por seguridad (entorno de producción).")
 
 
 # ==========================================
@@ -84,6 +93,7 @@ app.include_router(dev.router)
 def health_check():
     return {
         "status": "healthy",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "servicio": "CRM Ciclo Confort",
+        "entorno": settings.ENVIRONMENT,
     }

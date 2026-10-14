@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
-from app.api.deps import get_db
+from app.api.deps import get_db, get_current_user, validar_token_websocket
 from app.models.conversacion import Conversacion
 from app.models.mensaje import Mensaje
 from app.models.enums import ModoAtencion, TipoMensaje, TipoContenido, CanalOrigen
@@ -14,7 +14,7 @@ from app.services.notificacion_service import manager, NotificacionService
 router = APIRouter(prefix="/conversaciones", tags=["Conversaciones"])
 
 
-@router.get("/", response_model=list[ConversacionResponse])
+@router.get("/", response_model=list[ConversacionResponse], dependencies=[Depends(get_current_user)])
 def listar_conversaciones(db: Session = Depends(get_db)):
     """Lista todas las conversaciones activas, ordenadas por último mensaje."""
     return (
@@ -25,7 +25,7 @@ def listar_conversaciones(db: Session = Depends(get_db)):
     )
 
 
-@router.get("/{conv_id}", response_model=ConversacionResponse)
+@router.get("/{conv_id}", response_model=ConversacionResponse, dependencies=[Depends(get_current_user)])
 def obtener_conversacion(conv_id: int, db: Session = Depends(get_db)):
     """Obtiene los datos de una conversación."""
     conv = db.query(Conversacion).get(conv_id)
@@ -34,7 +34,7 @@ def obtener_conversacion(conv_id: int, db: Session = Depends(get_db)):
     return conv
 
 
-@router.get("/{conv_id}/mensajes", response_model=list[MensajeResponse])
+@router.get("/{conv_id}/mensajes", response_model=list[MensajeResponse], dependencies=[Depends(get_current_user)])
 def ver_mensajes(conv_id: int, db: Session = Depends(get_db)):
     """Obtiene el historial completo de mensajes de una conversación."""
     return (
@@ -48,7 +48,7 @@ def ver_mensajes(conv_id: int, db: Session = Depends(get_db)):
 # ================================================
 # HANDOFF: Tomar o devolver el control
 # ================================================
-@router.put("/{conv_id}/handoff")
+@router.put("/{conv_id}/handoff", dependencies=[Depends(get_current_user)])
 async def cambiar_modo_atencion(
     conv_id: int,
     request: HandoffRequest,
@@ -86,7 +86,7 @@ async def cambiar_modo_atencion(
 # ================================================
 # RESPONDER MANUALMENTE (como humano)
 # ================================================
-@router.post("/{conv_id}/responder")
+@router.post("/{conv_id}/responder", dependencies=[Depends(get_current_user)])
 async def responder_como_humano(
     conv_id: int,
     respuesta: RespuestaHumana,
@@ -139,11 +139,15 @@ async def responder_como_humano(
 
 
 # ================================================
-# WEBSOCKET: Conexión en tiempo real
+# WEBSOCKET: Conexión en tiempo real protegida
 # ================================================
 @router.websocket("/ws")
 async def websocket_global(websocket: WebSocket):
-    """WebSocket global — recibe notificaciones de TODAS las conversaciones."""
+    """WebSocket global protegido — recibe notificaciones de TODAS las conversaciones."""
+    usuario = await validar_token_websocket(websocket)
+    if not usuario:
+        return
+
     await manager.connect(websocket)
     try:
         while True:
@@ -154,7 +158,11 @@ async def websocket_global(websocket: WebSocket):
 
 @router.websocket("/ws/{conv_id}")
 async def websocket_conversacion(websocket: WebSocket, conv_id: int):
-    """WebSocket por conversación — recibe notificaciones de UNA conversación."""
+    """WebSocket por conversación protegido — recibe notificaciones de UNA conversación."""
+    usuario = await validar_token_websocket(websocket)
+    if not usuario:
+        return
+
     await manager.connect(websocket, conv_id)
     try:
         while True:
